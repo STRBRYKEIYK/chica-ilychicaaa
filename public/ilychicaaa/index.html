@@ -300,6 +300,11 @@ a{color:inherit;text-decoration:none;-webkit-tap-highlight-color:transparent}
 }
 .vcap-meta.playing{color:var(--red)}
 .vcap-meta.playing .dot{background:var(--red);animation:pulse 1.4s ease-in-out infinite}
+.video-tools{display:flex;align-items:center;flex-wrap:wrap;gap:10px 18px;margin-top:14px;font-size:11px;font-weight:700;letter-spacing:.1em}
+.video-tools a{display:inline-flex;align-items:center;min-height:44px;text-decoration:underline;text-underline-offset:4px}
+.video-retry{min-height:44px;border:1.5px solid var(--ink);padding:8px 12px;background:var(--card)}
+.video-retry[hidden],.video-error[hidden]{display:none}
+.video-error{margin-top:12px;font-size:12px;line-height:1.6;color:var(--red)}
 @keyframes pulse{50%{opacity:.35}}
 
 /* ---------- letter book page (matches library reader .page) ---------- */
@@ -646,8 +651,7 @@ footer .fine{
         <div class="vframe">
           <span class="mat">
             <div class="well">
-              <video id="love-video" controls playsinline preload="metadata" poster="/ilychicaaa/media/poster.jpg" controlsList="nodownload">
-                <source src="/ilychicaaa/media/para-sa-chica.mp4" type="video/mp4">
+              <video id="love-video" controls playsinline preload="metadata" poster="https://chica-ilychicaaa.vercel.app/ilychicaaa/media/poster.jpg?v=20261124-2" src="https://chica-ilychicaaa.vercel.app/ilychicaaa/media/para-sa-chica.mp4?v=20261124-2" controlsList="nodownload">
                 Your browser does not support video playback.
               </video>
             </div>
@@ -656,6 +660,11 @@ footer .fine{
         <div class="vcap">
           <span class="vcap-quote">“A little song from your Chico.”</span>
           <span class="vcap-meta" id="vStatus"><span class="dot" aria-hidden="true"></span><span id="vStatusTxt">RECORDED WITH LOVE · TAP PLAY</span></span>
+        </div>
+        <p class="video-error" id="videoError" role="status" hidden>Hindi nag-load ang video. Subukan muli o buksan ito nang direkta.</p>
+        <div class="video-tools">
+          <button class="video-retry" id="videoRetry" type="button" hidden>SUBUKAN MULI ANG VIDEO</button>
+          <a href="https://chica-ilychicaaa.vercel.app/ilychicaaa/media/para-sa-chica.mp4?v=20261124-2" target="_blank" rel="noopener">BUKSAN ANG VIDEO NANG DIREKTA ↗</a>
         </div>
       </div>
     </section>
@@ -721,8 +730,35 @@ footer .fine{
   var video = document.getElementById("love-video");
   var vStatus = document.getElementById("vStatus");
   var vStatusTxt = document.getElementById("vStatusTxt");
+  var videoError = document.getElementById("videoError");
+  var videoRetry = document.getElementById("videoRetry");
   if (video && vStatus && vStatusTxt) {
+    function showVideoError() {
+      vStatus.classList.remove("playing");
+      vStatusTxt.textContent = "SUBUKAN MULI ANG VIDEO";
+      videoError.hidden = false;
+      videoRetry.hidden = false;
+    }
+    function clearVideoError() {
+      videoError.hidden = true;
+      videoRetry.hidden = true;
+    }
+    video.addEventListener("error", showVideoError);
+    video.addEventListener("loadedmetadata", clearVideoError);
+    if (video.error) showVideoError();
+    videoRetry.addEventListener("click", function () {
+      var retryUrl = new URL(video.getAttribute("src"));
+      retryUrl.searchParams.set("retry", Date.now().toString());
+      video.src = retryUrl.toString();
+      video.load();
+      var playback = video.play();
+      if (playback && playback.catch) playback.catch(function () {
+        if (video.error) showVideoError();
+        else vStatusTxt.textContent = "TAP PLAY TO LISTEN";
+      });
+    });
     video.addEventListener("play", function () {
+      clearVideoError();
       vStatus.classList.add("playing");
       vStatusTxt.textContent = "NOW PLAYING · PARA SA'YO";
     });
