@@ -36,6 +36,10 @@ Open `http://localhost:4173/ilychicaaa/`.
 
 The video is the recording supplied by the user. If the performance includes a copyrighted musical composition, hosting it publicly could require permission for that composition even though the performance is your own. This package does not reproduce or quote lyrics in the page text.
 
-## Deployment boundary
+## Standalone Vercel deployment
 
-This package is prepared for integration; it is **not uploaded to GitHub or deployed to Vercel**. Existing domain and project should remain unchanged until the new route is reviewed and committed.
+This repository also serves `https://chica-ilychicaaa.vercel.app/`. The root `vercel.json` selects the `public` output directory and serves the letter at `/`, `/ilychicaaa`, and `/ilychicaaa/`.
+
+The existing library proxies `/ilychicaaa` and `/ilychicaaa/` to this deployment's `/`, and `/ilychicaaa/:path+` to `/:path+`. The `/media/:path*` rewrite serves the recording and poster through that proxy. Media URLs in the page start with `/ilychicaaa/media/` so they resolve correctly with or without a trailing slash on the page URL.
+
+Deploy changes by pushing to this repository's Vercel-connected production branch. The main library's domain assignment and other routes do not need to change.
