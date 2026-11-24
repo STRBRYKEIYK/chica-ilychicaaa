@@ -1,0 +1,572 @@
+Adversarial security and correctness review only; do not modify files or invoke tools. We are implementing private comments for only Chico and Chicaaa across eight page entry points in five Vercel sites. Two random 256-bit invitation keys are generated locally; only SHA256 hashes in source. Private links are not included. Existing private Blob credentials reused by date scheduler. All sites load one shared web component from main origin and use main /date/api/comments proxied to date project. Plain text, fixed authors from bearer key, append-only immutable objects, no edit/delete endpoints. Assess real bugs, confidentiality/auth, concurrency/idempotency, drafts and stale UI. Give severity, exact file:line, concrete fix. Be concise. Do not demand unrelated enterprise features. Tests use fake keys.
+
+FILE date/api/_comments.js
+1: import { createHash, timingSafeEqual } from "node:crypto";
+2: import { get, list, put } from "@vercel/blob";
+3: import { creds } from "./_dates.js";
+4: import { COMMENT_ACCESS } from "./_comment-access.js";
+5: 
+6: export const AUTHORS = Object.freeze({ chico: "Chico", chicaaa: "Chicaaa" });
+7: export const PAGES = new Set(["library", "oras", "555", "date", "vouchers", "second", "third", "ilychicaaa", ...["1010", "1111", "1212", "111", "222", "333", "444", "555"].map(slot => `oras-${slot}`)]);
+8: export const ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+9: export const LIMIT = 1200;
+10: const ROOT = "library-comments/v1/";
+11: 
+12: export function identify(header, access = COMMENT_ACCESS) {
+13:   const token = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(header || "")?.[1];
+14:   if (!token) return null;
+15:   const digest = createHash("sha256").update(token).digest();
+16:   for (const [role, hash] of Object.entries(access)) {
+17:     if (AUTHORS[role] && /^[a-f0-9]{64}$/.test(hash) && timingSafeEqual(digest, Buffer.from(hash, "hex"))) return role;
+18:   }
+19:   return null;
+20: }
+21: 
+22: export function sanitize(body) {
+23:   if (!body || typeof body !== "object" || Array.isArray(body) || !PAGES.has(body.page) || !ID.test(body.id || "") || typeof body.text !== "string") return null;
+24:   const text = body.text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
+25:   if (!text || text.length > LIMIT) return null;
+26:   return { id: body.id, page: body.page, text };
+27: }
+28: 
+29: export function pathname(page, author, id) {
+30:   return `${ROOT}${page}/${author}-${id}.json`;
+31: }
+32: 
+33: export function safeComment(value, page) {
+34:   if (!value || value.page !== page || !Object.hasOwn(AUTHORS, value.author) || !ID.test(value.id || "") || typeof value.text !== "string" || !value.text.trim() || value.text.length > LIMIT || !Number.isFinite(value.createdAt)) return null;
+35:   return { id: value.id, page, author: value.author, name: AUTHORS[value.author], text: value.text, createdAt: value.createdAt };
+36: }
+37: 
+38: // Every comment has its own immutable object. Concurrent submissions cannot overwrite each other.
+39: export const commentStore = {
+40:   async read(key) {
+41:     const response = await get(key, { access: "private", useCache: false, ...creds() });
+42:     if (!response || response.statusCode !== 200) return null;
+43:     return JSON.parse(await new Response(response.stream).text());
+44:   },
+45:   async append(key, entry) {
+46:     await put(key, JSON.stringify(entry), { access: "private", contentType: "application/json", addRandomSuffix: false, allowOverwrite: false, ...creds() });
+47:   },
+48:   async page(page, before) {
+49:     let cursor;
+50:     const blobs = [];
+51:     do {
+52:       const result = await list({ prefix: `${ROOT}${page}/`, limit: 1000, ...(cursor ? { cursor } : {}), ...creds() });
+53:       blobs.push(...result.blobs);
+54:       cursor = result.hasMore ? result.cursor : undefined;
+55:     } while (cursor);
+56:     blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt) || a.pathname.localeCompare(b.pathname));
+57:     const start = before ? blobs.findIndex(blob => blob.pathname === before) + 1 : 0;
+58:     if (before && start === 0) return { comments: [], next: null };
+59:     const selected = blobs.slice(start, start + 30);
+60:     const values = await Promise.all(selected.map(blob => this.read(blob.pathname)));
+61:     return {
+62:       comments: values.map(value => safeComment(value, page)).filter(Boolean).sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id)),
+63:       next: blobs.length > start + selected.length ? selected.at(-1)?.pathname || null : null
+64:     };
+65:   }
+66: };
+67: 
+
+FILE date/api/comments.js
+1: import { enabled } from "./_dates.js";
+2: import { AUTHORS, PAGES, identify, sanitize, pathname, safeComment, commentStore } from "./_comments.js";
+3: 
+4: const ORIGINS = new Set([
+5:   "https://chica.keicodes.dev", "https://chica-date-scheduler.vercel.app", "https://chica-ilychicaaa.vercel.app",
+6:   "https://love-voucher-book.vercel.app", "https://para-sa-chica.vercel.app", "https://kwento-natin.vercel.app"
+7: ]);
+8: 
+9: export default async function handler(req, res, options = {}) {
+10:   const store = options.store || commentStore;
+11:   res.setHeader("cache-control", "private, no-store");
+12:   res.setHeader("vary", "Origin");
+13:   res.setHeader("x-content-type-options", "nosniff");
+14:   const origin = req.headers?.origin;
+15:   if (origin && !ORIGINS.has(origin)) return res.status(403).json({ ok: false, error: "origin" });
+16:   if (origin) res.setHeader("access-control-allow-origin", origin);
+17:   res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+18:   res.setHeader("access-control-allow-headers", "Authorization, Content-Type");
+19:   if (req.method === "OPTIONS") return res.status(204).end();
+20:   if (req.method !== "GET" && req.method !== "POST") {
+21:     res.setHeader("allow", "GET, POST, OPTIONS");
+22:     return res.status(405).json({ ok: false, error: "method" });
+23:   }
+24:   const author = identify(req.headers?.authorization, options.access);
+25:   if (!author) return res.status(401).json({ ok: false, error: "access" });
+26:   if (!(options.enabled ?? enabled())) return res.status(503).json({ ok: false, error: "storage" });
+27:   try {
+28:     if (req.method === "GET") {
+29:       const page = req.query?.page;
+30:       const before = req.query?.before;
+31:       if (!PAGES.has(page) || (before !== undefined && (typeof before !== "string" || before.length > 200 || !before.startsWith(`library-comments/v1/${page}/`)))) return res.status(400).json({ ok: false, error: "page" });
+32:       const result = await store.page(page, before);
+33:       return res.status(200).json({ ok: true, viewer: { author, name: AUTHORS[author] }, ...result });
+34:     }
+35:     if (!/^application\/json(?:;|$)/i.test(req.headers?.["content-type"] || "")) return res.status(415).json({ ok: false, error: "json" });
+36:     if (Buffer.byteLength(JSON.stringify(req.body || {})) > 10000) return res.status(413).json({ ok: false, error: "size" });
+37:     const input = sanitize(req.body);
+38:     if (!input) return res.status(400).json({ ok: false, error: "comment" });
+39:     const key = pathname(input.page, author, input.id);
+40:     const existing = safeComment(await store.read(key), input.page);
+41:     if (existing) {
+42:       if (existing.text !== input.text) return res.status(409).json({ ok: false, error: "immutable" });
+43:       return res.status(200).json({ ok: true, comment: existing });
+44:     }
+45:     const entry = { ...input, author, name: AUTHORS[author], createdAt: (options.now || Date.now)() };
+46:     try {
+47:       await store.append(key, entry);
+48:     } catch (error) {
+49:       // A retried request may race its original. Accept only the exact already-saved comment.
+50:       const saved = safeComment(await store.read(key), input.page);
+51:       if (!saved) throw error;
+52:       if (saved.text !== input.text) return res.status(409).json({ ok: false, error: "immutable" });
+53:       return res.status(200).json({ ok: true, comment: saved });
+54:     }
+55:     return res.status(201).json({ ok: true, comment: entry });
+56:   } catch (error) {
+57:     console.error("comments store failed:", error?.name);
+58:     return res.status(503).json({ ok: false, error: "storage" });
+59:   }
+60: }
+61: 
+
+FILE date/api/_comment-access.js
+1: // Only hashes of the two private invitation keys are stored in this repository.
+2: export const COMMENT_ACCESS = Object.freeze({
+3:   "chico": "27d28098b055bec575f70134a56a22fc1e9bd9d27bcede7b245d65ea13a3a103",
+4:   "chicaaa": "387118e5c597a1cadb89e55de48608dd256e167aadc91a751faf8ed03ecf7c2c"
+5: });
+6: 
+
+FILE date/tests/comments.test.js
+1: import test from "node:test";
+2: import assert from "node:assert/strict";
+3: import { createHash, randomUUID } from "node:crypto";
+4: import handler from "../api/comments.js";
+5: import { identify, sanitize, safeComment } from "../api/_comments.js";
+6: 
+7: const keys = { chico: "a".repeat(43), chicaaa: "b".repeat(43) };
+8: const access = Object.fromEntries(Object.entries(keys).map(([role, key]) => [role, createHash("sha256").update(key).digest("hex")]));
+9: function memory() {
+10:   const entries = new Map();
+11:   return {
+12:     entries,
+13:     async read(key) { return entries.get(key) || null; },
+14:     async append(key, value) { if (entries.has(key)) throw new Error("Already exists"); entries.set(key, structuredClone(value)); },
+15:     async page(page) { return { comments: [...entries.values()].filter(value => value.page === page), next: null }; }
+16:   };
+17: }
+18: async function call({ method = "GET", role = "chico", body, page = "ilychicaaa", headers = {}, store = memory(), enabled = true } = {}) {
+19:   const req = { method, headers: { ...(role ? { authorization: `Bearer ${keys[role]}` } : {}), "content-type": "application/json", ...headers }, query: { page }, body };
+20:   const res = { code: 200, headers: {}, setHeader(key, value) { this.headers[key] = value; }, status(code) { this.code = code; return this; }, json(value) { this.body = value; return this; }, end() { return this; } };
+21:   await handler(req, res, { store, access, enabled, now: () => 1795495000000 });
+22:   return res;
+23: }
+24: test("only the two separate bearer keys identify a writer", () => {
+25:   assert.equal(identify(`Bearer ${keys.chico}`, access), "chico");
+26:   assert.equal(identify(`Bearer ${keys.chicaaa}`, access), "chicaaa");
+27:   for (const header of ["", `Bearer ${"x".repeat(43)}`, `Basic ${keys.chico}`, `Bearer ${keys.chico} extra`]) assert.equal(identify(header, access), null);
+28: });
+29: test("unauthenticated visitors cannot read or write comments", async () => {
+30:   for (const method of ["GET", "POST"]) assert.equal((await call({ method, role: null })).code, 401);
+31: });
+32: test("author comes from the access key; data stays in its page", async () => {
+33:   const store = memory(), id = randomUUID();
+34:   const result = await call({ method: "POST", role: "chicaaa", store, body: { id, page: "ilychicaaa", text: "hello\n<script>alert(1)</script>", author: "chico", name: "Someone" } });
+35:   assert.equal(result.code, 201);
+36:   assert.equal(result.body.comment.author, "chicaaa");
+37:   assert.equal(result.body.comment.name, "Chicaaa");
+38:   assert.equal(result.body.comment.createdAt, 1795495000000);
+39:   assert.equal((await call({ store, page: "date" })).body.comments.length, 0);
+40:   assert.equal((await call({ store })).body.comments.length, 1);
+41: });
+42: test("concurrent comments survive and retries never create duplicates", async () => {
+43:   const store = memory(), id = randomUUID();
+44:   const body = { id, page: "ilychicaaa", text: "First" };
+45:   const results = await Promise.all([call({ method: "POST", store, body }), call({ method: "POST", store, body }), call({ method: "POST", role: "chicaaa", store, body: { ...body, id: randomUUID(), text: "Second" } })]);
+46:   assert(results.every(result => result.code === 200 || result.code === 201));
+47:   assert.equal(store.entries.size, 2);
+48:   assert.equal((await call({ method: "POST", store, body })).code, 200);
+49:   assert.equal(store.entries.size, 2);
+50: });
+51: test("saved comments cannot be changed or deleted", async () => {
+52:   const store = memory(), body = { id: randomUUID(), page: "ilychicaaa", text: "Original" };
+53:   await call({ method: "POST", store, body });
+54:   assert.equal((await call({ method: "POST", store, body: { ...body, text: "Edited" } })).code, 409);
+55:   for (const method of ["DELETE", "PUT", "PATCH"]) assert.equal((await call({ method, store, body })).code, 405);
+56:   assert.equal([...store.entries.values()][0].text, "Original");
+57: });
+58: test("page keys, empty/oversized text, content type and origins are checked", async () => {
+59:   for (const body of [{ id: randomUUID(), page: "../dates", text: "x" }, { id: randomUUID(), page: "ilychicaaa", text: "   " }, { id: randomUUID(), page: "ilychicaaa", text: "x".repeat(1201) }, { id: "../../x", page: "ilychicaaa", text: "x" }]) assert.equal((await call({ method: "POST", body })).code, 400);
+60:   assert.equal((await call({ method: "POST", headers: { "content-type": "text/plain" } })).code, 415);
+61:   assert.equal((await call({ headers: { origin: "https://evil.example" } })).code, 403);
+62:   assert.equal((await call({ method: "OPTIONS", role: null, headers: { origin: "https://chica.keicodes.dev" } })).code, 204);
+63:   assert.equal((await call({ headers: { origin: "https://chica.keicodes.dev" } })).headers["access-control-allow-origin"], "https://chica.keicodes.dev");
+64: });
+65: test("storage failures do not report a successful save", async () => {
+66:   assert.equal((await call({ enabled: false })).code, 503);
+67:   const store = memory(); store.append = async () => { throw new Error("Offline"); };
+68:   assert.equal((await call({ method: "POST", store, body: { id: randomUUID(), page: "ilychicaaa", text: "Keep this draft" } })).code, 503);
+69: });
+70: test("all page and time threads are validated; malformed records stay out", () => {
+71:   assert(sanitize({ id: randomUUID(), page: "oras-1212", text: "Good\u0000\r\nnight" }));
+72:   assert.equal(sanitize({ id: randomUUID(), page: "oras-999", text: "x" }), null);
+73:   assert.equal(safeComment({ id: randomUUID(), page: "date", author: "toString", text: "x", createdAt: 1 }, "date"), null);
+74: });
+75: 
+
+FILE library/public/shared/comments.js
+1: (() => {
+2:   "use strict";
+3:   if (customElements.get("library-notes")) return;
+4:   const source = document.currentScript;
+5:   const configuredPage = source?.dataset.page || "library";
+6:   const API = "https://chica.keicodes.dev/date/api/comments";
+7:   const STORAGE = "chica.comments.access.v1";
+8:   const MAX = 1200;
+9:   const SLOTS = new Set(["1010", "1111", "1212", "111", "222", "333", "444", "555"]);
+10:   const invitation = /^#comment-key=([A-Za-z0-9_-]{43})$/.exec(location.hash)?.[1] || "";
+11:   let currentPage = configuredPage;
+12:   if (configuredPage === "oras" && SLOTS.has(location.hash.slice(1))) currentPage = `oras-${location.hash.slice(1)}`;
+13:   const readKey = () => { try { return localStorage.getItem(STORAGE) || ""; } catch { return ""; } };
+14:   const saveKey = key => { try { key ? localStorage.setItem(STORAGE, key) : localStorage.removeItem(STORAGE); } catch { /* Access still works in this tab. */ } };
+15:   const make = (tag, className, text) => {
+16:     const node = document.createElement(tag);
+17:     if (className) node.className = className;
+18:     if (text !== undefined) node.textContent = text;
+19:     return node;
+20:   };
+21:   const uuid = () => crypto.randomUUID();
+22:   const draftKey = (page, author) => `chica.comments.draft.${page}.${author}`;
+23:   const draft = (page, author, value) => {
+24:     try {
+25:       const key = draftKey(page, author);
+26:       if (value === undefined) return sessionStorage.getItem(key) || "";
+27:       value ? sessionStorage.setItem(key, value) : sessionStorage.removeItem(key);
+28:     } catch { /* The visible draft remains available when storage is restricted. */ }
+29:     return "";
+30:   };
+31:   const style = `
+32:     :host{display:block;box-sizing:border-box;width:calc(100% - 36px);max-width:760px;margin:48px auto 56px;color:#121111;font:16px/1.6 "DM Sans",system-ui,sans-serif;text-transform:none;text-align:left;letter-spacing:normal;color-scheme:light}
+33:     *,*::before,*::after{box-sizing:border-box} [hidden]{display:none!important}
+34:     .slip{background:#fdfdfb;border:1.5px solid #121111;box-shadow:5px 5px 0 #121111;padding:26px;position:relative}
+35:     .eyebrow,.label,.who,.tag,.actions button,.unlock button,.feed-head button,.older,time,.count{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+36:     .eyebrow{color:#c8102e;margin:0 0 8px}.slip h2{font-family:"Playfair Display",Georgia,serif;font-weight:900;font-style:italic;font-size:clamp(28px,5vw,36px);line-height:1.15;letter-spacing:-.025em;margin:0 0 10px}
+37:     .context{margin:0;color:#67635d;font-size:12px;overflow-wrap:anywhere}.head{padding-bottom:20px;border-bottom:1px solid #d6d3cb}.pair{display:flex;gap:8px;margin:18px 0 14px}.tag{padding:4px 9px;border:1px solid #121111;background:#f3f3f0}.tag.red{color:#c8102e;border-color:#c8102e}
+38:     p{margin:0}.intro,.permanence{font-size:13px;line-height:1.65;color:#56514d}.intro{margin-bottom:16px}.permanence{margin:14px 0 0}.label{display:block;margin-bottom:7px}.field{margin-top:18px}
+39:     input,textarea,button{font:inherit;border-radius:0}input,textarea{display:block;width:100%;max-width:100%;background:#fff;color:#121111;border:1.5px solid #99928a;padding:12px;font-size:16px;line-height:1.6;box-shadow:none}textarea{min-height:132px;resize:vertical}textarea::placeholder,input::placeholder{color:#78716b;opacity:1}
+40:     button{cursor:pointer;min-height:44px;border:1.5px solid #121111;padding:10px 15px;background:#fdfdfb;color:#121111;font-weight:700}button:hover{background:#f3f3f0}button:disabled,button[aria-disabled=true]{opacity:.6;cursor:wait}.primary{background:#c8102e;color:#fff;border-color:#c8102e;box-shadow:3px 3px 0 #121111}.primary:hover{background:#121111;border-color:#121111}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #c8102e;outline-offset:3px}
+41:     .unlock button{margin-top:12px}.identity{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:20px}.who{color:#c8102e}.identity button{font-size:10px;letter-spacing:.08em;min-height:44px;border-color:#d6d3cb}.count{text-align:right;color:#67635d;font-size:10px;margin-top:6px}.actions{display:flex;align-items:center;gap:16px;margin-top:14px}.actions .primary{min-width:205px}
+42:     .status,.error{font-size:13px;line-height:1.6;margin-top:16px;overflow-wrap:anywhere}.status:empty,.error:empty{display:none}.error{color:#a30b24;border-left:3px solid #c8102e;padding-left:12px}.feed-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;border-top:1px solid #121111;margin-top:28px;padding-top:16px}.feed-head h3{margin:0;font-size:11px;letter-spacing:.16em}.feed-head button{font-size:10px;border-color:#d6d3cb}
+43:     ol{padding:0;list-style:none;margin:8px 0 0}li{border-bottom:1px solid #d6d3cb;padding:18px 0}.note-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:5px 14px;margin-bottom:8px}strong{font-size:12px;letter-spacing:.08em;text-transform:uppercase}.chicaaa{color:#c8102e}time{font-size:10px;letter-spacing:.04em;color:#67635d}.body{font-size:15px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere;text-transform:none}.empty{padding:18px 0;color:#67635d;font-size:14px;line-height:1.7}.older{margin-top:18px}.hint{font-size:12px;color:#67635d;margin-top:10px}
+44:     @media(max-width:480px){:host{width:calc(100% - 32px);margin:32px auto 42px}.slip{padding:18px 16px;box-shadow:3px 3px 0 #121111}.actions{display:block}.actions .primary,.unlock button,.older{width:100%}.head{padding-bottom:16px}time{font-size:10px}}
+45:   `;
+46: 
+47:   class LibraryNotes extends HTMLElement {
+48:     static get observedAttributes() { return ["page-key"]; }
+49:     constructor() {
+50:       super();
+51:       this.attachShadow({ mode: "open" });
+52:       this.key = invitation || readKey();
+53:       this.viewer = null;
+54:       this.comments = [];
+55:       this.next = null;
+56:       this.generation = 0;
+57:       this.pending = new Map();
+58:     }
+59:     connectedCallback() {
+60:       if (this.initialized) return;
+61:       this.initialized = true;
+62:       this.build();
+63:       if (this.key) this.load();
+64:     }
+65:     attributeChangedCallback(_name, previous, next) {
+66:       if (!this.initialized || previous === next) return;
+67:       this.generation++;
+68:       this.comments = [];
+69:       this.next = null;
+70:       this.status.textContent = "";
+71:       this.error.textContent = "";
+72:       this.updateContext();
+73:       this.textarea.value = this.viewer ? draft(next, this.viewer.author) : "";
+74:       this.updateCount();
+75:       if (this.key) this.load();
+76:       else this.renderList();
+77:     }
+78:     get page() { return this.getAttribute("page-key") || "library"; }
+79:     build() {
+80:       const css = make("style"); css.textContent = style;
+81:       const section = make("section", "slip"); section.setAttribute("aria-labelledby", "notes-title");
+82:       const head = make("header", "head");
+83:       head.append(make("p", "eyebrow", "TALA SA PAHINA · CHICAAA + CHICO"));
+84:       const title = make("h2", "", "Mga tala nating dalawa"); title.id = "notes-title";
+85:       this.context = make("p", "context");
+86:       head.append(title, this.context);
+87:       section.append(head);
+88:       this.gate = make("div", "gate");
+89:       const pair = make("div", "pair"); pair.append(make("span", "tag red", "CHICAAA"), make("span", "tag", "CHICO"));
+90:       this.gate.append(pair, make("p", "intro", "Isang munting espasyo para sa ating dalawa. Gamitin ang sarili mong private link o access code para mabasa ang mga tala at makapagsulat."));
+91:       const unlock = make("form", "unlock");
+92:       const accessLabel = make("label", "label", "PRIVATE LINK O ACCESS CODE"); accessLabel.htmlFor = "notes-access";
+93:       this.access = make("input"); this.access.id = "notes-access"; this.access.type = "password"; this.access.autocomplete = "off"; this.access.required = true; this.access.maxLength = 200; this.access.spellcheck = false;
+94:       const unlockButton = make("button", "primary", "BUKSAN ANG MGA TALA"); unlockButton.type = "submit";
+95:       unlock.append(accessLabel, this.access, unlockButton);
+96:       unlock.addEventListener("submit", event => {
+97:         event.preventDefault();
+98:         const input = this.access.value.trim();
+99:         const key = /^https:\/\//.test(input) ? (() => { try { return /^#comment-key=([A-Za-z0-9_-]{43})$/.exec(new URL(input).hash)?.[1] || ""; } catch { return ""; } })() : input;
+100:         if (!/^[A-Za-z0-9_-]{43}$/.test(key)) { this.error.textContent = "Pakigamit ang private link o access code na para sa iyo."; return; }
+101:         this.key = key; this.load();
+102:       });
+103:       this.gate.append(unlock, make("p", "hint", "Buksan ang private link mo nang isang beses sa bawat browser. Dito lang maaalala kung sino ang nagsusulat."));
+104:       section.append(this.gate);
+105:       this.content = make("div"); this.content.hidden = true;
+106:       const identity = make("div", "identity");
+107:       this.who = make("span", "who");
+108:       const change = make("button", "", "IBANG ACCESS"); change.type = "button";
+109:       change.addEventListener("click", () => this.lock());
+110:       identity.append(this.who, change);
+111:       this.form = make("form");
+112:       const field = make("div", "field");
+113:       const label = make("label", "label", "MENSAHE MO"); label.htmlFor = "notes-message";
+114:       this.textarea = make("textarea"); this.textarea.id = "notes-message"; this.textarea.rows = 4; this.textarea.maxLength = MAX; this.textarea.required = true; this.textarea.placeholder = "Mag-iwan ng tala kung kailan mo gusto…";
+115:       this.textarea.setAttribute("aria-describedby", "notes-permanence notes-count");
+116:       this.counter = make("p", "count", `0 / ${MAX}`); this.counter.id = "notes-count";
+117:       this.textarea.addEventListener("input", () => { this.updateCount(); if (this.viewer) draft(this.page, this.viewer.author, this.textarea.value); });
+118:       field.append(label, this.textarea, this.counter);
+119:       const actions = make("div", "actions");
+120:       this.submit = make("button", "primary", "ILAGAY SA PAHINA"); this.submit.type = "submit";
+121:       actions.append(this.submit);
+122:       const permanence = make("p", "permanence", "Kapag ipinadala, mananatili ang tala sa pahinang ito. Hindi na ito mae-edit o mabubura rito."); permanence.id = "notes-permanence";
+123:       this.form.append(field, actions, permanence);
+124:       this.form.addEventListener("submit", event => { event.preventDefault(); this.send(); });
+125:       const feedHead = make("div", "feed-head");
+126:       feedHead.append(make("h3", "", "MGA NAIWANG TALA"));
+127:       this.refresh = make("button", "", "I-REFRESH ANG MGA TALA"); this.refresh.type = "button";
+128:       this.refresh.addEventListener("click", () => this.load());
+129:       feedHead.append(this.refresh);
+130:       this.list = make("ol"); this.list.setAttribute("aria-label", "Mga tala nina Chicaaa at Chico");
+131:       this.empty = make("p", "empty", "Wala pang tala sa pahinang ito. Bukas ang espasyong ito anumang oras.");
+132:       this.older = make("button", "older", "MGA NAUNANG TALA"); this.older.type = "button"; this.older.hidden = true;
+133:       this.older.addEventListener("click", () => this.load(true));
+134:       this.content.append(identity, this.form, feedHead, this.empty, this.list, this.older);
+135:       this.status = make("p", "status"); this.status.setAttribute("role", "status"); this.status.setAttribute("aria-live", "polite");
+136:       this.error = make("p", "error"); this.error.setAttribute("role", "alert");
+137:       section.append(this.content, this.status, this.error);
+138:       this.shadowRoot.append(css, section);
+139:       this.updateContext();
+140:     }
+141:     updateContext() {
+142:       const slot = this.page.startsWith("oras-") ? this.page.slice(5) : "";
+143:       this.context.textContent = slot ? `${slot.slice(0, -2)}:${slot.slice(-2)} · Mga Oras Natin` : document.title.split(" · ")[0] || "Library ni Chico";
+144:     }
+145:     updateCount() { this.counter.textContent = `${this.textarea.value.length} / ${MAX}`; }
+146:     lock() {
+147:       this.generation++;
+148:       saveKey(""); this.key = ""; this.viewer = null; this.comments = []; this.next = null;
+149:       this.gate.hidden = false; this.content.hidden = true; this.access.value = ""; this.textarea.value = "";
+150:       this.status.textContent = ""; this.error.textContent = "";
+151:       this.refresh.disabled = false; this.older.disabled = false; this.list.removeAttribute("aria-busy");
+152:       this.access.focus();
+153:     }
+154:     async request(method, page, body, before, key = this.key) {
+155:       const controller = new AbortController();
+156:       const timeout = setTimeout(() => controller.abort(), 20000);
+157:       try {
+158:         const url = new URL(API); url.searchParams.set("page", page);
+159:         if (before) url.searchParams.set("before", before);
+160:         const response = await fetch(url, { method, headers: { authorization: `Bearer ${key}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), cache: "no-store", signal: controller.signal, credentials: "omit" });
+161:         const result = await response.json();
+162:         if (!response.ok || !result.ok) { const error = new Error(result.error || "network"); error.status = response.status; throw error; }
+163:         return result;
+164:       } finally { clearTimeout(timeout); }
+165:     }
+166:     async load(older = false) {
+167:       if (!this.key || (older && !this.next)) return;
+168:       const generation = ++this.generation, page = this.page, key = this.key;
+169:       if (this.verifiedKey && key !== this.verifiedKey) { this.viewer = null; this.content.hidden = true; this.gate.hidden = false; }
+170:       this.status.textContent = "BINUBUKLAT ANG MGA TALA…"; this.error.textContent = "";
+171:       this.refresh.disabled = true; this.older.disabled = true;
+172:       this.list.setAttribute("aria-busy", "true");
+173:       try {
+174:         const result = await this.request("GET", page, null, older ? this.next : null, key);
+175:         if (generation !== this.generation) return;
+176:         this.viewer = result.viewer; this.verifiedKey = key; saveKey(key);
+177:         this.access.value = ""; this.gate.hidden = true; this.content.hidden = false;
+178:         this.who.textContent = `NAGSUSULAT BILANG ${result.viewer.name.toUpperCase()}`;
+179:         this.textarea.value = draft(page, result.viewer.author);
+180:         this.updateCount();
+181:         this.comments = older ? [...this.comments, ...result.comments] : result.comments;
+182:         this.next = result.next;
+183:         this.renderList();
+184:         this.status.textContent = "";
+185:       } catch (error) {
+186:         if (generation !== this.generation) return;
+187:         this.status.textContent = "";
+188:         if (error.status === 401) {
+189:           this.lock(); this.error.textContent = "Hindi nakilala ang access. Pakibuksan ang private link na para sa iyo.";
+190:         } else this.error.textContent = "Hindi muna mabuksan ang mga tala. Nakatabi pa ang draft mo. Subukan muli.";
+191:       } finally {
+192:         if (generation === this.generation) { this.refresh.disabled = false; this.older.disabled = false; this.list.removeAttribute("aria-busy"); }
+193:       }
+194:     }
+195:     renderList() {
+196:       this.list.replaceChildren();
+197:       const seen = new Set();
+198:       for (const comment of this.comments) {
+199:         const identity = `${comment.author}:${comment.id}`;
+200:         if (seen.has(identity)) continue;
+201:         seen.add(identity);
+202:         const li = make("li"), article = make("article"), head = make("header", "note-head");
+203:         head.append(make("strong", comment.author === "chicaaa" ? "chicaaa" : "", comment.name));
+204:         const time = make("time");
+205:         const date = new Date(comment.createdAt);
+206:         time.dateTime = date.toISOString();
+207:         time.textContent = new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(date) + " · PH";
+208:         head.append(time);
+209:         article.append(head, make("p", "body", comment.text)); li.append(article); this.list.append(li);
+210:       }
+211:       this.empty.hidden = seen.size > 0;
+212:       this.older.hidden = !this.next;
+213:     }
+214:     async send() {
+215:       if (this.sending || !this.viewer || !this.key) return;
+216:       const text = this.textarea.value.trim();
+217:       if (!text || text.length > MAX) { this.error.textContent = "May gusto ka bang isulat muna?"; this.textarea.focus(); return; }
+218:       const page = this.page, viewer = this.viewer, key = this.key, scope = `${page}:${viewer.author}`;
+219:       let pending = this.pending.get(scope);
+220:       if (!pending || pending.text !== text) { pending = { id: uuid(), text }; this.pending.set(scope, pending); }
+221:       this.sending = true; this.submit.setAttribute("aria-disabled", "true"); this.submit.textContent = "INILALAGAY…"; this.textarea.readOnly = true;
+222:       this.error.textContent = ""; this.status.textContent = "Inilalagay ang tala mo…";
+223:       try {
+224:         const result = await this.request("POST", page, { page, ...pending }, null, key);
+225:         this.pending.delete(scope); draft(page, viewer.author, "");
+226:         if (page === this.page && key === this.key) {
+227:           this.textarea.value = ""; this.updateCount();
+228:           this.comments.unshift(result.comment); this.renderList();
+229:           this.status.textContent = "Nailagay na ang tala mo.";
+230:         }
+231:       } catch (error) {
+232:         if (page === this.page && key === this.key) {
+233:           this.status.textContent = "";
+234:           if (error.status === 401) { this.lock(); this.error.textContent = "Pakibuksan muli ang private link mo. Nakatabi pa ang draft mo."; }
+235:           else this.error.textContent = "Hindi pa nakumpirma ang pag-save. Nakatabi pa ang isinulat mo; pindutin muli ang Ilagay sa pahina para subukan ulit.";
+236:         }
+237:       } finally {
+238:         this.sending = false; this.submit.removeAttribute("aria-disabled"); this.submit.textContent = "ILAGAY SA PAHINA"; this.textarea.readOnly = false;
+239:       }
+240:     }
+241:   }
+242:   customElements.define("library-notes", LibraryNotes);
+243:   document.addEventListener("chica:comment-page", event => {
+244:     if (configuredPage !== "oras" || !/^oras(?:-(?:1010|1111|1212|111|222|333|444|555))?$/.test(event.detail?.page || "")) return;
+245:     currentPage = event.detail.page;
+246:     document.querySelector("library-notes")?.setAttribute("page-key", currentPage);
+247:   });
+248:   const boot = () => {
+249:     if (invitation && /^#comment-key=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
+250:     if (document.querySelector("library-notes")) return;
+251:     const notes = document.createElement("library-notes"); notes.setAttribute("page-key", currentPage);
+252:     document.body.append(notes);
+253:     window.addEventListener("storage", event => {
+254:       if (event.key !== STORAGE) return;
+255:       if (!event.newValue) notes.lock();
+256:       else { notes.key = event.newValue; notes.load(); }
+257:     });
+258:   };
+259:   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true });
+260:   else boot();
+261: })();
+262: 
+
+FILE library/src/test/comments.test.js
+1: import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+2: import { waitFor } from "@testing-library/dom";
+3: import { readFileSync } from "node:fs";
+4: import { webcrypto } from "node:crypto";
+5: 
+6: const key = "a".repeat(43);
+7: const viewer = { author: "chicaaa", name: "Chicaaa" };
+8: const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
+9: let notes;
+10: beforeAll(() => { window.eval(readFileSync("public/shared/comments.js", "utf8")); });
+11: beforeEach(() => {
+12:   document.body.replaceChildren(); localStorage.clear(); sessionStorage.clear();
+13:   vi.stubGlobal("crypto", webcrypto);
+14:   vi.stubGlobal("fetch", vi.fn(async () => response({ ok: true, viewer, comments: [], next: null })));
+15: });
+16: afterEach(() => { document.body.replaceChildren(); vi.unstubAllGlobals(); });
+17: function mount(authenticated = true) {
+18:   if (authenticated) localStorage.setItem("chica.comments.access.v1", key);
+19:   notes = document.createElement("library-notes"); notes.setAttribute("page-key", "ilychicaaa"); document.body.append(notes);
+20:   return notes;
+21: }
+22: describe("shared two-person notes", () => {
+23:   it("keeps the comment list and composer locked without a private key", () => {
+24:     mount(false);
+25:     expect(notes.content.hidden).toBe(true);
+26:     expect(notes.gate.hidden).toBe(false);
+27:     expect(fetch).not.toHaveBeenCalled();
+28:   });
+29:   it("uses the server-verified name, safely displays text, and has no destructive actions", async () => {
+30:     fetch.mockResolvedValue(response({ ok: true, viewer, comments: [{ id: "1", author: "chico", name: "Chico", text: '<img src=x onerror="alert(1)">\nhello', createdAt: 1795495000000 }], next: null }));
+31:     mount();
+32:     await waitFor(() => expect(notes.content.hidden).toBe(false));
+33:     expect(notes.who.textContent).toContain("CHICAAA");
+34:     expect(notes.list.textContent).toContain('<img src=x onerror="alert(1)">');
+35:     expect(notes.list.querySelector("img")).toBeNull();
+36:     expect(notes.list.querySelector("button")).toBeNull();
+37:     expect(notes.list.querySelector("time").textContent).toContain("PH");
+38:   });
+39:   it("keeps a failed draft and retries the same id after uncertain network delivery", async () => {
+40:     mount(); await waitFor(() => expect(notes.viewer).not.toBeNull());
+41:     notes.textarea.value = "A note for you";
+42:     notes.textarea.dispatchEvent(new Event("input"));
+43:     fetch.mockRejectedValueOnce(new Error("Network interrupted"));
+44:     await notes.send();
+45:     const first = JSON.parse(fetch.mock.calls.at(-1)[1].body);
+46:     expect(notes.textarea.value).toBe("A note for you");
+47:     expect(notes.error.textContent).toContain("Nakatabi");
+48:     fetch.mockImplementationOnce(async (_url, options) => response({ ok: true, comment: { ...JSON.parse(options.body), ...viewer, createdAt: Date.now() } }, 201));
+49:     await notes.send();
+50:     const second = JSON.parse(fetch.mock.calls.at(-1)[1].body);
+51:     expect(second.id).toBe(first.id);
+52:     expect(notes.textarea.value).toBe("");
+53:     expect(notes.list.textContent).toContain("A note for you");
+54:   });
+55:   it("blocks double submits and restores the composer after an error", async () => {
+56:     mount(); await waitFor(() => expect(notes.viewer).not.toBeNull());
+57:     notes.textarea.value = "Only once";
+58:     let finish;
+59:     fetch.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+60:     const sending = notes.send();
+61:     await notes.send();
+62:     expect(fetch.mock.calls.filter(([, options]) => options.method === "POST")).toHaveLength(1);
+63:     expect(notes.textarea.readOnly).toBe(true);
+64:     finish(response({ ok: false, error: "storage" }, 503)); await sending;
+65:     expect(notes.textarea.readOnly).toBe(false);
+66:     expect(notes.textarea.value).toBe("Only once");
+67:   });
+68:   it("rejects stale list responses when moving to another page", async () => {
+69:     let finishFirst;
+70:     fetch.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
+71:     mount();
+72:     notes.setAttribute("page-key", "oras-1212");
+73:     await waitFor(() => expect(notes.content.hidden).toBe(false));
+74:     finishFirst(response({ ok: true, viewer, comments: [{ id: "old", author: "chico", name: "Chico", text: "wrong page", createdAt: 1 }], next: null }));
+75:     await new Promise(resolve => setTimeout(resolve, 0));
+76:     expect(notes.list.textContent).not.toContain("wrong page");
+77:     expect(new URL(fetch.mock.calls[1][0]).searchParams.get("page")).toBe("oras-1212");
+78:   });
+79:   it("restores a separate draft for each thread", async () => {
+80:     mount(); await waitFor(() => expect(notes.viewer).not.toBeNull());
+81:     notes.textarea.value = "12:12 draft"; notes.textarea.dispatchEvent(new Event("input"));
+82:     notes.setAttribute("page-key", "date");
+83:     await waitFor(() => expect(notes.textarea.value).toBe(""));
+84:     notes.setAttribute("page-key", "ilychicaaa");
+85:     await waitFor(() => expect(notes.textarea.value).toBe("12:12 draft"));
+86:   });
+87: });
+88: 
